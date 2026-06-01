@@ -39,7 +39,7 @@ def process_new_pdfs(uploaded_files):
 
 conversation_manager = ConversationManager()
 st.set_page_config(page_title="RAG Chatbot")
-st.title("🤖 Chat with your PDFs 📄")
+st.title("Chat with your PDFs")
 
 # Folder for saving uploaded PDFs
 UPLOAD_DIR = Path("uploaded_pdfs")
@@ -91,7 +91,7 @@ if st.sidebar.button("Re-index all PDFs"):
     st.rerun()
 
 
-st.sidebar.subheader("📁 Already Saved PDFs:")
+st.sidebar.subheader("Already Saved PDFs:")
 if st.session_state.processed_files:
     for pdf_path in st.session_state.processed_files :
         st.sidebar.markdown(f"- {pdf_path}")
@@ -104,7 +104,7 @@ else:
 
 #########################
 ###### PDF Upload
-st.sidebar.header("📄 Upload PDFs")
+st.sidebar.header("Upload PDFs")
 
 # Hochladen der PDF-Dateien
 uploaded_files = st.sidebar.file_uploader(
@@ -118,9 +118,9 @@ uploaded_files = st.sidebar.file_uploader(
 if uploaded_files:
     process_new_pdfs(uploaded_files)
 
-st.sidebar.header("🌐 Add Website URLs")
+st.sidebar.header("Add Website URLs")
 urls = st.sidebar.text_area("Enter website URLs (one per line)").splitlines()
-if st.sidebar.button("📥 Add websites"):
+if st.sidebar.button("Add websites"):
     cleaned_urls = [u.strip() for u in urls if u and u.strip()]
     if not cleaned_urls:
         st.sidebar.warning("Enter at least one valid URL.")
@@ -164,7 +164,7 @@ for msg in st.session_state.llm.get_history():
 
 #########################
 # Sidebar actions
-if st.sidebar.button("🗑️ Reset Conversation"):
+if st.sidebar.button("Reset Conversation"):
     st.session_state.llm.reset()
     conversation_manager.clear()
     st.rerun()
