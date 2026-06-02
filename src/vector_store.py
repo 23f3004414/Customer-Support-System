@@ -1,11 +1,8 @@
-import logging
-
 from pathlib import Path
 from typing import List
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_ollama import ChatOllama
 from langchain_ollama.embeddings import OllamaEmbeddings
 from langchain.schema import Document
 from langchain_core.vectorstores import VectorStoreRetriever
@@ -14,10 +11,6 @@ from langchain_community.document_loaders import WebBaseLoader
 import faiss
 import bs4
 
-# Constants
-model = "granite3.3"
-llm = ChatOllama(model=model)
-embeddings_model = OllamaEmbeddings(model=model)
 VECTOR_STORE_PATH = Path("faiss_index")
 
 
@@ -72,8 +65,9 @@ class VectorStore:
         website_to_documents(urls: list[str]) -> list[Document]:
             Converts URLs to LangChain Document objects with metadata.
     """
-    def __init__(self, vector_store_path=VECTOR_STORE_PATH, llm_model="granite3.3",
-                  chunk_size=500, chunk_overlap=50, persist=True, index_path="faiss_index"):
+    def __init__(self, vector_store_path=VECTOR_STORE_PATH, embedding_model="nomic-embed-text",
+                  chunk_size=500, chunk_overlap=50, persist=True, index_path="faiss_index",
+                  llm_model=None):
         """
         Initialize the VectorStore class.
 
@@ -95,8 +89,8 @@ class VectorStore:
         index_path (str): The path to the Faiss index file.
         """
         self.vector_store_path = vector_store_path
-        self.llm_model = llm_model
-        self.embeddings_model = OllamaEmbeddings(model=llm_model)
+        self.embedding_model = llm_model or embedding_model
+        self.embeddings_model = OllamaEmbeddings(model=self.embedding_model)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.persist = persist
@@ -122,19 +116,16 @@ class VectorStore:
         Returns:
             None
         """
-        print(self.vector_store_path)
         if self.vector_store_path.exists():
             self.vector_store =  FAISS.load_local(str(self.vector_store_path), 
                                     embeddings=self.embeddings_model,
                                      allow_dangerous_deserialization=True)
         else:
-            print(f"No Vectorstore found at {str(self.vector_store_path)}")
-
             self.embedding_dim = len(self.embeddings_model.embed_query("hello world"))
             self.index = faiss.IndexFlatL2(self.embedding_dim)
 
             self.vector_store = FAISS(
-                embedding_function=embeddings_model,
+                embedding_function=self.embeddings_model,
                 index=self.index,
                 docstore=InMemoryDocstore(),
                 index_to_docstore_id={},
@@ -155,9 +146,7 @@ class VectorStore:
         """
         documents = []
         for pdf_path in Path(data_path).glob("*.pdf"):
-            docs = self.load_document(pdf_path)
-            print(len(docs))
-            documents.extend(docs)
+            documents.extend(self.load_document(pdf_path))
         return documents
     
     def add_documents(self, documents: List[Document]) -> List[Document]:
@@ -185,9 +174,18 @@ class VectorStore:
         Returns:
             List[Document]: A list of chunked Document objects.
         """
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=self.chunk_size, 
-                                              chunk_overlap=self.chunk_overlap)    
-        return text_splitter.split_documents(documents)
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+        )
+        chunks = text_splitter.split_documents(documents)
+        per_source_index = {}
+        for chunk in chunks:
+            source = chunk.metadata.get("source", "")
+            idx = per_source_index.get(source, 0)
+            chunk.metadata["chunk_index"] = idx
+            per_source_index[source] = idx + 1
+        return chunks
     
     
     def load_document(self, pdf_path: Path) -> List[Document]:
@@ -217,7 +215,7 @@ class VectorStore:
         docs = self.load_document(filePath)
         return self.add_documents(docs)
     
-    def similarity_search(self, question: str, k:int) -> List[Document]:
+    def similarity_search(self, question: str, k: int = 4) -> List[Document]:
         """
         Performs a similarity search on the vector store using the provided question.
 
@@ -229,6 +227,53 @@ class VectorStore:
             List[Document]: A list of the top-k documents most similar to the input question.
         """
         return self.vector_store.similarity_search(question, k=k)
+
+    def _intro_chunks(self) -> List[Document]:
+        """First chunk per source file (resume header / contact block)."""
+        intros = []
+        seen_sources = set()
+        for doc in self.vector_store.docstore._dict.values():
+            source = doc.metadata.get("source", "")
+            if not source or source in seen_sources:
+                continue
+            if doc.metadata.get("chunk_index", 0) == 0:
+                intros.append(doc)
+                seen_sources.add(source)
+
+        if intros:
+            return intros
+
+        # Fallback for indexes created before chunk_index metadata was added.
+        by_source: dict[str, Document] = {}
+        for doc in self.vector_store.docstore._dict.values():
+            source = doc.metadata.get("source", "")
+            if not source:
+                continue
+            head = doc.page_content[:400]
+            is_header = "@" in head or doc.metadata.get("page", 0) == 0
+            if source not in by_source:
+                by_source[source] = doc
+            elif is_header and "@" not in by_source[source].page_content[:400]:
+                by_source[source] = doc
+        return list(by_source.values())
+
+    @staticmethod
+    def _dedupe_documents(documents: List[Document]) -> List[Document]:
+        seen = set()
+        unique = []
+        for doc in documents:
+            key = doc.page_content.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(doc)
+        return unique
+
+    def retrieve_documents(self, question: str, k: int = 8) -> List[Document]:
+        """Semantic search plus intro chunks so names/contact lines are not missed."""
+        semantic = self.similarity_search(question, k=k)
+        merged = self._dedupe_documents(self._intro_chunks() + semantic)
+        return merged[: k + len(self._intro_chunks())]
     
     def as_retriever(self) -> VectorStoreRetriever:
         """
@@ -250,7 +295,12 @@ class VectorStore:
         Returns:
             List[Document]: A list of Document objects created from the indexed websites.
         """
-        docs = self.website_to_documents(urls)
+        cleaned = [u.strip() for u in urls if u and u.strip()]
+        if not cleaned:
+            return []
+        docs = self.website_to_documents(cleaned)
+        if not docs:
+            return []
         return self.add_documents(docs)
 
     def website_to_documents(self, urls: list[str]) -> list[Document]:

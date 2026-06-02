@@ -1,17 +1,22 @@
+import sys
 import streamlit as st
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 from llm_rag import LLMRAGHandler
 from conversation import ConversationManager
-from langchain_community.vectorstores import FAISS
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+FAISS_INDEX_PATH = Path("faiss_index")
 
 def process_new_pdfs(uploaded_files):
     if "processed_files" not in st.session_state:
         st.session_state.processed_files = set()
 
     for file in uploaded_files:
-        print(st.session_state.processed_files)
-        print(file.name)
         if file.name in st.session_state.processed_files:
             continue
 
@@ -21,8 +26,12 @@ def process_new_pdfs(uploaded_files):
 
         st.sidebar.success(f"{file.name} saved.")
 
-        with st.spinner(f"{file.name} is processed..."):
-            st.session_state.llm.add_pdf_to_context(save_path)
+        try:
+            with st.spinner(f"{file.name} is processed..."):
+                st.session_state.llm.add_pdf_to_context(save_path)
+        except Exception as exc:
+            st.sidebar.error(f"Failed to index {file.name}: {exc}")
+            continue
 
         st.session_state.processed_files.add(file.name)
         st.sidebar.success(f"{file.name} was indexed.")
@@ -48,6 +57,38 @@ if "llm" not in st.session_state:
 
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = {p.name for p in UPLOAD_DIR.glob("*.pdf")}
+
+def _indexed_pdf_names(vector_store) -> set[str]:
+    names = set()
+    for doc in vector_store.vector_store.docstore._dict.values():
+        source = doc.metadata.get("source", "")
+        if source:
+            names.add(Path(source).name)
+    return names
+
+
+if "pdfs_synced" not in st.session_state:
+    indexed_names = _indexed_pdf_names(st.session_state.llm.vector_store)
+    for pdf_path in UPLOAD_DIR.glob("*.pdf"):
+        if pdf_path.name in indexed_names:
+            continue
+        try:
+            with st.spinner(f"Indexing {pdf_path.name}..."):
+                st.session_state.llm.add_pdf_to_context(pdf_path)
+            st.sidebar.success(f"Indexed {pdf_path.name}")
+        except Exception as exc:
+            st.sidebar.error(f"Could not index {pdf_path.name}: {exc}")
+    st.session_state.pdfs_synced = True
+
+if st.sidebar.button("Re-index all PDFs"):
+    for pdf_path in UPLOAD_DIR.glob("*.pdf"):
+        try:
+            with st.spinner(f"Re-indexing {pdf_path.name}..."):
+                st.session_state.llm.add_pdf_to_context(pdf_path)
+        except Exception as exc:
+            st.sidebar.error(f"Failed: {pdf_path.name}: {exc}")
+    st.sidebar.success("Re-index complete.")
+    st.rerun()
 
 
 st.sidebar.subheader("📁 Already Saved PDFs:")
@@ -80,10 +121,19 @@ if uploaded_files:
 st.sidebar.header("🌐 Add Website URLs")
 urls = st.sidebar.text_area("Enter website URLs (one per line)").splitlines()
 if st.sidebar.button("📥 Add websites"):
-    with st.spinner("Processing websites..."):
-        print(urls)
-        st.session_state.llm.vector_store.index_websites(urls)
-    st.sidebar.success("Websites indexed successfully.")
+    cleaned_urls = [u.strip() for u in urls if u and u.strip()]
+    if not cleaned_urls:
+        st.sidebar.warning("Enter at least one valid URL.")
+    else:
+        try:
+            with st.spinner("Processing websites..."):
+                added = st.session_state.llm.vector_store.index_websites(cleaned_urls)
+            if added:
+                st.sidebar.success(f"Indexed {len(added)} document chunk(s).")
+            else:
+                st.sidebar.warning("No content found at those URLs.")
+        except Exception as exc:
+            st.sidebar.error(f"Website indexing failed: {exc}")
 #########################
 
 
@@ -91,13 +141,14 @@ if st.sidebar.button("📥 Add websites"):
 ##### Chat input
 user_input = st.chat_input("Type your message...")
 if user_input:
-    #response = st.session_state.llm.ask(user_input)
-    
-    with st.spinner("Thinking..."):
-        response = st.session_state.llm.generate_response(user_input)
-        print(f"Response: {response}")
-        print(type(response))
-conversation_manager.save(st.session_state.llm.get_history())
+    try:
+        with st.spinner("Thinking..."):
+            st.session_state.llm.generate_response(user_input)
+    except Exception as exc:
+        st.error(f"Could not generate a response: {exc}")
+    else:
+        conversation_manager.save(st.session_state.llm.get_history())
+        st.rerun()
 
 # Display chat messages
 for msg in st.session_state.llm.get_history():

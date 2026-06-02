@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from langchain_ollama.chat_models import ChatOllama
 from langchain_core.prompts import PromptTemplate
@@ -5,8 +6,18 @@ from langchain.schema import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from typing import List
 from langchain.schema import Document
 from vector_store import VectorStore
-from langchain.chains.retrieval import create_retrieval_chain
 from langchain_core.output_parsers import StrOutputParser
+
+
+def _format_chat_history(history: List[BaseMessage]) -> str:
+    lines = []
+    for msg in history:
+        if isinstance(msg, SystemMessage):
+            continue
+        role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+        lines.append(f"{role}: {msg.content}")
+    return "\n".join(lines) if lines else "None"
+
 
 class LLMRAGHandler:
     """
@@ -22,7 +33,7 @@ class LLMRAGHandler:
         rag_chain (Chain): The retrieval chain.
     
     Methods:
-        __init__(self, model="granite3.3"): Initializes the LLMRAGHandler with the specified model.
+        __init__(self, model=None): Initializes the LLMRAGHandler with the specified model (or OLLAMA_MODEL env).
         generate_response(self, human_message) -> AIMessage: Generates and appends a response from the LLM.
         reset(self) -> None: Resets the conversation history.
         get_history(self) -> List[BaseMessage]: Returns the conversation history.
@@ -30,22 +41,27 @@ class LLMRAGHandler:
         add_pdf_to_context(self, filePath: Path): Adds a PDF file to the context for retrieval.
 
     """
-    def __init__(self, model="granite3.3"):
+    def __init__(self, model=None):
         """        
         Initializes the LLMRAGHandler with the specified model.
 
         Args:
-            model (str): The model to use for the language model and vector store. Default is "granite3.3".
+            model (str | None): Ollama chat model. Defaults to OLLAMA_MODEL / OLLAMA_CHAT_MODEL
+                (llama3.2:1b). Embeddings use OLLAMA_EMBED_MODEL (nomic-embed-text).
         """
-        self.llm = ChatOllama(model=model)
-        self.vector_store = VectorStore(llm_model=model)
+        chat_model = model or os.environ.get("OLLAMA_MODEL") or os.environ.get(
+            "OLLAMA_CHAT_MODEL", "llama3.2:1b"
+        )
+        embed_model = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        self.llm = ChatOllama(model=chat_model)
+        self.vector_store = VectorStore(embedding_model=embed_model)
         
         # System prompt - These are the instructions for the model
-        self.system_prompt = "You are an assistant for question-answering tasks." \
-        " Use the following pieces of retrieved context to answer the question. " \
-        "If you don't know the answer, try to answer the question without context but mention that " \
-        "the context does not provide enough information." \
-        " Use three sentences maximum and keep the answer concise."
+        self.system_prompt = (
+            "You are a helpful assistant that answers questions about uploaded documents. "
+            "Use ONLY the provided Context to answer. If the answer appears in the Context, "
+            "state it clearly. Do not claim information is missing when it is present in the Context."
+        )
         
         # keep track of the conversation history
         self.history = []
@@ -53,16 +69,13 @@ class LLMRAGHandler:
 
         # prompt template for q&a with rag
         self.rag_prompt = PromptTemplate.from_template(
-        "Previous conversation: {chat_history}"
-        " Question: {input}" \
-        " Context: {context}" \
-        " Answer:")
+            "Context:\n{context}\n\n"
+            "Previous conversation:\n{chat_history}\n\n"
+            "Question: {input}\n\n"
+            "Answer using the Context above:"
+        )
 
-        # Chain for querying the LLM and getting the answer
         self.llm_chain = self.rag_prompt | self.llm | StrOutputParser()
-
-        # Create retrieval chain for RAG 
-        self.rag_chain = create_retrieval_chain(self.vector_store.as_retriever(), self.llm_chain)
 
     
     def generate_response(self, human_message) -> AIMessage:
@@ -75,22 +88,23 @@ class LLMRAGHandler:
         Returns:
             AIMessage: The AI's response.
         """
-        print(f"Adding Humang Message...")
-        print(f"{human_message}")
+        docs = self.vector_store.retrieve_documents(human_message, k=8)
+        if not docs:
+            answer = (
+                "No document content is indexed yet. Upload a PDF in the sidebar "
+                "and wait until it shows as indexed, then ask again."
+            )
+        else:
+            context = "\n\n---\n\n".join(doc.page_content for doc in docs)
+            answer = self.llm_chain.invoke({
+                "input": human_message,
+                "context": context,
+                "chat_history": _format_chat_history(self.history),
+            })
 
-        print("Generating response from LLM...")
-        context_docs = self.retrieve(human_message)
-        # Run the retrieval chain
-        response = self.rag_chain.invoke({
-            "input": human_message,
-            "context": context_docs,
-            "chat_history": self.history}
-        )
-        print(response)
-
-        self.history.append(HumanMessage(content=human_message))                
-        self.history.append(AIMessage(content=response["answer"]))
-        return response["answer"]
+        self.history.append(HumanMessage(content=human_message))
+        self.history.append(AIMessage(content=answer))
+        return answer
 
     def reset(self) -> None:
         """
@@ -119,8 +133,7 @@ class LLMRAGHandler:
         Returns:
             List[Document]: The retrieved documents.
         """
-        retrieved_docs = self.vector_store.similarity_search(question, k=k)
-        return retrieved_docs
+        return self.vector_store.retrieve_documents(question, k=k)
 
     
     def add_pdf_to_context(self, filePath: Path) -> List[Document]:

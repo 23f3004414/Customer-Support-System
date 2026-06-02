@@ -45,8 +45,8 @@ class ConversationManager:
         Returns:
             None
         """
-        with self.STATE_FILE.open("w") as f:
-            json.dump([message_to_dict(m) for m in messages], f)
+        with self.STATE_FILE.open("w", encoding="utf-8") as f:
+            json.dump([message_to_dict(m) for m in messages], f, ensure_ascii=False)
 
     def load(self) -> List[BaseMessage]:
         """
@@ -58,12 +58,9 @@ class ConversationManager:
         if not self.STATE_FILE.exists():
             return []
         if self.STATE_FILE.stat().st_size == 0:
-            print("Conversation is empty")
             return []
-        with self.STATE_FILE.open() as f:
-            message_dict = json.load(f)
-            print(message_dict)
-            return messages_from_dict(message_dict)
+        with self.STATE_FILE.open(encoding="utf-8") as f:
+            return messages_from_dict(json.load(f))
     
     def clear(self) -> None:
         """
