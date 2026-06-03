@@ -152,11 +152,15 @@ if user_input:
         st.rerun()
 
 # Display chat messages
-for msg in st.session_state.llm.get_history():
-    if isinstance(msg, SystemMessage):
-        # do not display instructions for the chatbot
-        continue
-    
+visible_messages = [
+    msg for msg in st.session_state.llm.get_history()
+    if not isinstance(msg, SystemMessage)
+]
+
+if not visible_messages and not st.session_state.processed_files:
+    st.info("Upload a PDF or add website URLs to start asking grounded questions.")
+
+for msg in visible_messages:
     role = "user" if isinstance(msg, HumanMessage) else "assistant"
     with st.chat_message(role):
         st.markdown(msg.content)
