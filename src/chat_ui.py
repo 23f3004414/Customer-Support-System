@@ -40,6 +40,7 @@ def process_new_pdfs(uploaded_files):
 conversation_manager = ConversationManager()
 st.set_page_config(page_title="RAG Chatbot")
 st.title("Chat with your PDFs")
+st.caption("Upload PDFs or website URLs and ask grounded questions from your indexed content.")
 
 # Folder for saving uploaded PDFs
 UPLOAD_DIR = Path("uploaded_pdfs")
